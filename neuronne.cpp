@@ -3,15 +3,45 @@
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
+#include <algorithm> // Pour std::max
 
-// Fonction d'activation (sigmoïde)
+// Fonctions d'activation
 double sigmoid(double x) {
     return 1.0 / (1.0 + exp(-x));
 }
 
-// Dérivée de la fonction sigmoïde
 double sigmoidDerivative(double x) {
     return x * (1.0 - x);
+}
+
+double relu(double x) {
+    return std::max(0.0, x);
+}
+
+double reluDerivative(double x) {
+    return x > 0 ? 1.0 : 0.0;
+}
+
+double tanh(double x) {
+    return std::tanh(x);
+}
+
+double tanhDerivative(double x) {
+    return 1.0 - x * x;
+}
+
+double leakyRelu(double x) {
+    return x > 0 ? x : 0.01 * x;
+}
+
+double leakyReluDerivative(double x) {
+    return x > 0 ? 1.0 : 0.01;
+}
+
+// Initialisation Xavier/Glorot
+double xavierInitialization(int numInputs) {
+    double range = sqrt(6.0 / (numInputs + 1));
+    return ((double)rand() / RAND_MAX) * 2 * range - range;
 }
 
 // Classe pour représenter un neurone
@@ -23,19 +53,26 @@ public:
     double delta;
 
     Neuron(int numInputs) {
-        // Initialisation aléatoire des poids et du biais
         for (int i = 0; i < numInputs; ++i) {
-            weights.push_back((double)rand() / RAND_MAX);
+            weights.push_back(xavierInitialization(numInputs));
         }
-        bias = (double)rand() / RAND_MAX;
+        bias = xavierInitialization(numInputs);
     }
 
-    double activate(const std::vector<double>& inputs) {
+    double activate(const std::vector<double>& inputs, const std::string& activationFunc = "sigmoid") {
         double activation = bias;
         for (size_t i = 0; i < inputs.size(); ++i) {
             activation += inputs[i] * weights[i];
         }
-        output = sigmoid(activation);
+        if (activationFunc == "relu") {
+            output = relu(activation);
+        } else if (activationFunc == "tanh") {
+            output = tanh(activation);
+        } else if (activationFunc == "leakyRelu") {
+            output = leakyRelu(activation);
+        } else {
+            output = sigmoid(activation); // Par défaut, sigmoïde
+        }
         return output;
     }
 };
@@ -44,8 +81,10 @@ public:
 class Layer {
 public:
     std::vector<Neuron> neurons;
+    std::string activationFunc;
 
-    Layer(int numNeurons, int numInputsPerNeuron) {
+    Layer(int numNeurons, int numInputsPerNeuron, const std::string& activationFunc = "relu")
+        : activationFunc(activationFunc) {
         for (int i = 0; i < numNeurons; ++i) {
             neurons.push_back(Neuron(numInputsPerNeuron));
         }
@@ -54,7 +93,7 @@ public:
     std::vector<double> feedForward(const std::vector<double>& inputs) {
         std::vector<double> outputs;
         for (auto& neuron : neurons) {
-            outputs.push_back(neuron.activate(inputs));
+            outputs.push_back(neuron.activate(inputs, activationFunc));
         }
         return outputs;
     }
@@ -64,10 +103,12 @@ public:
 class NeuralNetwork {
 public:
     std::vector<Layer> layers;
+    double lambda; // Paramètre de régularisation L2
 
-    NeuralNetwork(const std::vector<int>& topology) {
+    NeuralNetwork(const std::vector<int>& topology, double lambda = 0.001) : lambda(lambda) {
         for (size_t i = 0; i < topology.size() - 1; ++i) {
-            layers.push_back(Layer(topology[i + 1], topology[i]));
+            std::string activationFunc = (i == topology.size() - 2) ? "sigmoid" : "relu"; // Couche de sortie : sigmoïde
+            layers.push_back(Layer(topology[i + 1], topology[i], activationFunc));
         }
     }
 
@@ -81,9 +122,14 @@ public:
 
     void train(const std::vector<std::vector<double>>& trainingInputs, const std::vector<std::vector<double>>& trainingOutputs, int epochs, double learningRate) {
         for (int epoch = 0; epoch < epochs; ++epoch) {
+            double totalLoss = 0.0;
             for (size_t i = 0; i < trainingInputs.size(); ++i) {
                 // Forward pass
                 std::vector<double> outputs = predict(trainingInputs[i]);
+
+                // Calcul de la perte
+                double loss = calculateLoss(outputs, trainingOutputs[i]);
+                totalLoss += loss;
 
                 // Backpropagation
                 for (size_t j = 0; j < layers.size(); ++j) {
@@ -99,30 +145,47 @@ public:
                             for (auto& nextNeuron : layers[layers.size() - j].neurons) {
                                 error += nextNeuron.weights[k] * nextNeuron.delta;
                             }
-                            neuron.delta = error * sigmoidDerivative(neuron.output);
+                            if (layer.activationFunc == "relu") {
+                                neuron.delta = error * reluDerivative(neuron.output);
+                            } else if (layer.activationFunc == "tanh") {
+                                neuron.delta = error * tanhDerivative(neuron.output);
+                            } else if (layer.activationFunc == "leakyRelu") {
+                                neuron.delta = error * leakyReluDerivative(neuron.output);
+                            } else {
+                                neuron.delta = error * sigmoidDerivative(neuron.output);
+                            }
                         }
                     }
                 }
 
-                // Mise à jour des poids et des biais
+                // Mise à jour des poids et des biais avec régularisation L2
                 for (auto& layer : layers) {
                     for (auto& neuron : layer.neurons) {
                         for (size_t k = 0; k < neuron.weights.size(); ++k) {
-                            neuron.weights[k] += learningRate * neuron.delta * (k < trainingInputs[i].size() ? trainingInputs[i][k] : 1.0);
+                            neuron.weights[k] += learningRate * (neuron.delta * (k < trainingInputs[i].size() ? trainingInputs[i][k] : 1.0) - lambda * neuron.weights[k]);
                         }
                         neuron.bias += learningRate * neuron.delta;
                     }
                 }
             }
+            std::cout << "Epoch " << epoch << ", Loss: " << totalLoss / trainingInputs.size() << std::endl;
         }
+    }
+
+    double calculateLoss(const std::vector<double>& outputs, const std::vector<double>& targets) {
+        double loss = 0.0;
+        for (size_t i = 0; i < outputs.size(); ++i) {
+            loss += 0.5 * pow(targets[i] - outputs[i], 2);
+        }
+        return loss / outputs.size();
     }
 };
 
 int main() {
     srand(time(0));
 
-    // Topologie du réseau : 2 entrées, 2 neurones dans la couche cachée, 1 sortie
-    NeuralNetwork nn({2, 2, 1});
+    // Topologie du réseau : 2 entrées, 2 couches cachées de 4 neurones, 1 sortie
+    NeuralNetwork nn({2, 4, 4, 1}, 0.001); // Régularisation L2 avec lambda = 0.001
 
     // Données d'entraînement pour un problème XOR simple
     std::vector<std::vector<double>> trainingInputs = {{0, 0}, {0, 1}, {1, 0}, {1, 1}};
@@ -139,17 +202,3 @@ int main() {
 
     return 0;
 }
-
-
-// Résultat attendu
-
-// Input: 0, 0 -> Output: 0.0188358
-// Input: 0, 1 -> Output: 0.982445
-// Input: 1, 0 -> Output: 0.387763
-// Input: 1, 1 -> Output: 0.396075
-
-// Attendu : 
-// 0, 0 : 0
-// 0, 1 : 1
-// 1, 0 : 1
-// 1, 1 : 0
